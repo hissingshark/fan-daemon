@@ -1,0 +1,102 @@
+#!/bin/bash
+
+### global variables
+
+PIDFile=/var/run/fan-daemon.pid
+echo $$ > $PIDFile
+
+user=
+pword=
+curr_subs=0
+prev_subs=0
+errorlog=/tmp/fan-daemon.log
+holding=0
+loop_res=10 #loop delay in seconds
+# multiples of loop res
+hold_time=30 #post-subscription cool-off ~5mins
+interval_time=330 # ~hourly cool-off because of baseline amplifier and tuner heating
+interval=$interval_time #means the fan runs at first boot in case of any latent heat
+
+### functions
+
+function fanon {
+    echo "4" > /sys/class/gpio/export
+    sleep 1
+    echo "out" > /sys/class/gpio/gpio4/direction
+}
+
+function fanoff {
+    echo "4" > /sys/class/gpio/unexport
+}
+
+function get_subs {
+    # get the number of subscriptions from the server
+    raw_reply=$(curl -s "http://$user:$pword@localhost:9981/api/status/subscriptions")
+
+    # we keep the raw response for error logging
+    proc_reply=$(echo $raw_reply | sed 's/}//g' | rev | cut -d : -f 1)
+
+    # check we got an actual number and use it
+    if [[ $proc_reply =~ '^[0-9]+$' ]]; then
+        stamp="[$(date +%a\ %d/%m/%y\ %H:%M:%S)]"
+        echo -e "$stamp ERROR: did not get an integer response for the number of subscriptions!\nRaw Reply was:\n$raw_reply\nProcessed Reply was:\n$proc_reply\n" >> "$errorlog"
+    else
+        curr_subs=$proc_reply
+    fi
+}
+
+### main loop
+
+# every "loop_res" seconds check the number of subscriptions
+# start the fan if  we're up from 0
+# enter hold-off if we just dropped to 0
+# or at the regular cooling interval in case of heat from the amp
+# stop the fan if hold-off time expired
+
+stamp="[$(date +%a\ %d/%m/%y\ %H:%M:%S)]"
+echo "$stamp Starting logging..." > "$errorlog"
+
+while true; do
+    stamp="[$(date +%a\ %d/%m/%y\ %H:%M:%S)]"
+    get_subs
+    if [[ "$curr_subs" -gt "$prev_subs" ]]; then
+        echo -n "$stamp " >> "$errorlog"
+        if [[ "$prev_subs" -eq "0" ]]; then
+            if [[ "$holding" -gt "0" ]]; then
+                echo -n "Hold-off Mode -> ABORT." >> "$errorlog"
+            else
+		interval=0
+                fanon
+                echo -n "Fan -> ON. " >> "$errorlog"
+            fi
+            holding=0
+        fi
+        echo "Subs: $curr_subs" >> "$errorlog"
+    elif [[ "$curr_subs" -lt "$prev_subs" ]]; then
+        echo -n "$stamp " >> "$errorlog"
+        if [[ "$curr_subs" -eq "0" ]]; then
+            holding=1
+            echo -n "Hold-off Mode -> ON. " >> "$errorlog"
+        fi
+        echo "Subs: $curr_subs" >> "$errorlog"
+    elif [[ "$curr_subs" -eq "0" ]]; then
+        if [[ "$holding" -gt "0" ]]; then
+            ((holding ++))
+            if [[ "$holding" -gt "$hold_time" ]]; then
+                holding=0
+                fanoff
+                echo "$stamp Hold-off -> DONE.  Fan -> OFF..." >> "$errorlog"
+            fi
+        else
+            ((interval++))
+            if [[ "$interval" -gt "$interval_time" ]]; then
+                fanon
+                interval=0
+                holding=1
+                echo "$stamp Interval Hold-off Mode -> ON. " >> "$errorlog"
+            fi
+        fi
+    fi
+    prev_subs=$curr_subs
+    sleep $loop_res
+done

@@ -1,0 +1,13 @@
+[Unit]
+Description=TVHeadend Subscription Monitoring And Fan Control Daemon
+
+[Service]
+WorkingDirectory=/usr/bin/
+ExecStart=/usr/bin/nohup fan-daemon &
+ExecStop=/bin/kill -s KILL $(cat /var/run/fan-daemon.pid)
+Type=simple
+PIDFile=/var/run/fan-daemon.pid
+
+[Install]
+WantedBy=multi-user.target
+
